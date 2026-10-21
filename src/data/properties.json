@@ -1,0 +1,272 @@
+[
+  {
+    "id": "prop_krabi_01",
+    "title": "Baan Talay Work & Dive Villa",
+    "location": "Klong Muang, Krabi",
+    "region": "Krabi",
+    "pricePerNightUsd": 115,
+    "rating": 4.91,
+    "reviewCount": 84,
+    "distanceToDiveCenterMins": 6,
+    "tagline": "Dedicated fiber workspace & private plunge pool nestled in a serene cul-de-sac",
+    "listedAmenities": ["High-Speed Wi-Fi", "Dedicated Workspace", "Private Pool", "Air Conditioning", "Free Parking", "Kitchenette"],
+    "heroImage": "https://images.unsplash.com/photo-1582719508461-905c673771fd?auto=format&fit=crop&w=800&q=80",
+    "verifiedHighlights": {
+      "wifiSpeedMbps": 185,
+      "deskAvailable": true,
+      "nightNoiseLevel": "dead quiet",
+      "divePierWalkMins": 6
+    },
+    "reviews": [
+      {
+        "id": "rev_101",
+        "author": "Liam K.",
+        "date": "2026-08",
+        "text": "Stayed for two weeks while working European hours. The fiber Wi-Fi clocked 185 Mbps down / 90 Mbps up consistently, and the ergonomic chair in the study saved my back during 4-hour Zoom marathons.",
+        "sentiment": "positive",
+        "topics": ["wifi", "workspace", "zoom"]
+      },
+      {
+        "id": "rev_102",
+        "author": "Priya M.",
+        "date": "2026-07",
+        "text": "Dead quiet at night since it's tucked in a cul-de-sac away from the main beach road. Fast 5-minute scooter ride to Aqua Vision Dive Center for morning boat departures.",
+        "sentiment": "positive",
+        "topics": ["noise", "diving", "sleep"]
+      },
+      {
+        "id": "rev_103",
+        "author": "Marcus T.",
+        "date": "2026-06",
+        "text": "Only minor downside is you are a 15-minute drive from the busy Ao Nang nightlife, so you definitely need to rent a scooter or use Grab for dinner variety.",
+        "sentiment": "mixed",
+        "topics": ["location", "nightlife", "transport"]
+      }
+    ]
+  },
+  {
+    "id": "prop_krabi_02",
+    "title": "Ao Nang Pierfront Loft Studio",
+    "location": "Ao Nang Beach, Krabi",
+    "region": "Krabi",
+    "pricePerNightUsd": 72,
+    "rating": 4.65,
+    "reviewCount": 142,
+    "distanceToDiveCenterMins": 2,
+    "tagline": "Steps from longtail boat departures and PADI dive centers with ocean views",
+    "listedAmenities": ["Wi-Fi", "Balcony", "Sea View", "Air Conditioning", "Walk to Beach", "Gear Rinse Station"],
+    "heroImage": "https://images.unsplash.com/photo-1520250497591-112f2f40a3f4?auto=format&fit=crop&w=800&q=80",
+    "verifiedHighlights": {
+      "wifiSpeedMbps": 20,
+      "deskAvailable": false,
+      "nightNoiseLevel": "loud late night",
+      "divePierWalkMins": 2
+    },
+    "reviews": [
+      {
+        "id": "rev_201",
+        "author": "Elena R.",
+        "date": "2026-09",
+        "text": "Unbeatable location for scuba divers! Three PADI 5-star dive shops are literally downstairs, and the longtail boat pickup for the islands is a 3-minute walk across the street.",
+        "sentiment": "positive",
+        "topics": ["diving", "location"]
+      },
+      {
+        "id": "rev_202",
+        "author": "David S.",
+        "date": "2026-08",
+        "text": "Do NOT book this if you need to take work calls or sleep before midnight. The live music bar across the alley blasts bass until 1:00 AM, and the shared hotel Wi-Fi dropped twice during my team standup.",
+        "sentiment": "negative",
+        "topics": ["noise", "wifi", "workspace"]
+      },
+      {
+        "id": "rev_203",
+        "author": "Hannah W.",
+        "date": "2026-05",
+        "text": "Great value for $72 and super clean, plus there is a dedicated outdoor rinse tank on the ground floor for washing wetsuit gear.",
+        "sentiment": "positive",
+        "topics": ["diving", "value"]
+      }
+    ]
+  },
+  {
+    "id": "prop_krabi_03",
+    "title": "Railay Limestone Cliff Bungalow",
+    "location": "Railay East, Krabi",
+    "region": "Krabi",
+    "pricePerNightUsd": 98,
+    "rating": 4.78,
+    "reviewCount": 96,
+    "distanceToDiveCenterMins": 8,
+    "tagline": "Tranquil car-free peninsula sanctuary flanked by dramatic limestone karst cliffs",
+    "listedAmenities": ["Wi-Fi", "Garden View", "Patio", "Breakfast Included", "Air Conditioning"],
+    "heroImage": "https://images.unsplash.com/photo-1540555700478-4be289fbecef?auto=format&fit=crop&w=800&q=80",
+    "verifiedHighlights": {
+      "wifiSpeedMbps": 25,
+      "deskAvailable": false,
+      "nightNoiseLevel": "dead quiet",
+      "divePierWalkMins": 8
+    },
+    "reviews": [
+      {
+        "id": "rev_301",
+        "author": "Noah B.",
+        "date": "2026-09",
+        "text": "Zero cars or motorbikes on the Railay peninsula, so you wake up only to birds and limestone cliff views. Railay Dive Center is an easy 8-minute walk along the boardwalk.",
+        "sentiment": "positive",
+        "topics": ["noise", "diving", "nature"]
+      },
+      {
+        "id": "rev_302",
+        "author": "Chloe G.",
+        "date": "2026-07",
+        "text": "Wi-Fi is fine for emails and Netflix (around 25 Mbps), but during heavy tropical rainstorms the peninsula connection lags. Also, there's only a low coffee table—no proper desk for laptop work.",
+        "sentiment": "mixed",
+        "topics": ["wifi", "workspace"]
+      },
+      {
+        "id": "rev_303",
+        "author": "Julian S.",
+        "date": "2026-06",
+        "text": "Absolute heaven if you want to unplug, read, and kayak between sea arches. Just be prepared to carry luggage on foot since there are no road vehicles on Railay.",
+        "sentiment": "positive",
+        "topics": ["peace", "transport"]
+      }
+    ]
+  },
+  {
+    "id": "prop_phuket_01",
+    "title": "Chalong Bay Diver's Sanctuary & Co-Work",
+    "location": "Chalong Pier, Phuket",
+    "region": "Phuket",
+    "pricePerNightUsd": 88,
+    "rating": 4.89,
+    "reviewCount": 119,
+    "distanceToDiveCenterMins": 3,
+    "tagline": "Purpose-built base for working scuba divers with 24/7 monitors and pier convenience",
+    "listedAmenities": ["Fiber Wi-Fi", "Dedicated Workspace", "Pool", "Gear Rinse Station", "Gym", "Monitors Available"],
+    "heroImage": "https://images.unsplash.com/photo-1566073771259-6a8506099945?auto=format&fit=crop&w=800&q=80",
+    "verifiedHighlights": {
+      "wifiSpeedMbps": 200,
+      "deskAvailable": true,
+      "nightNoiseLevel": "dead quiet",
+      "divePierWalkMins": 3
+    },
+    "reviews": [
+      {
+        "id": "rev_401",
+        "author": "Arjun V.",
+        "date": "2026-09",
+        "text": "Purpose-built for working divers. You are a 3-minute walk from Chalong Pier where all the Phi Phi and Racha day boats depart at 7:30 AM. I finished a 3-dive day by 4 PM and hopped straight onto evening product calls with 200 Mbps fiber.",
+        "sentiment": "positive",
+        "topics": ["diving", "wifi", "workspace"]
+      },
+      {
+        "id": "rev_402",
+        "author": "Sophie L.",
+        "date": "2026-08",
+        "text": "Super quiet bedrooms with double-glazed glass and a 24/7 co-working lounge on the 2nd floor with external monitors you can plug into.",
+        "sentiment": "positive",
+        "topics": ["noise", "workspace", "monitors"]
+      },
+      {
+        "id": "rev_403",
+        "author": "Ben C.",
+        "date": "2026-06",
+        "text": "Note that Chalong Bay has boats, not a swimming beach—you'll need a 12-minute taxi to Kata or Nai Harn if you want soft sand beach lounging.",
+        "sentiment": "mixed",
+        "topics": ["beach", "location"]
+      }
+    ]
+  },
+  {
+    "id": "prop_phuket_02",
+    "title": "Rawai Hillside Infinity Villa",
+    "location": "Rawai Beach, Phuket",
+    "region": "Phuket",
+    "pricePerNightUsd": 128,
+    "rating": 4.85,
+    "reviewCount": 67,
+    "distanceToDiveCenterMins": 11,
+    "tagline": "Panoramic sea views, ultra-fast 300 Mbps fiber, and dual monitors on a quiet hillside",
+    "listedAmenities": ["High-Speed Wi-Fi", "Dedicated Workspace", "Infinity Pool", "Sea View", "Kitchen", "Free Parking"],
+    "heroImage": "https://images.unsplash.com/photo-1571896349842-33c89424de2d?auto=format&fit=crop&w=800&q=80",
+    "verifiedHighlights": {
+      "wifiSpeedMbps": 300,
+      "deskAvailable": true,
+      "nightNoiseLevel": "dead quiet",
+      "divePierWalkMins": 11
+    },
+    "reviews": [
+      {
+        "id": "rev_501",
+        "author": "Karin M.",
+        "date": "2026-09",
+        "text": "The fastest internet I've ever experienced in Southeast Asia—tested at 310 Mbps symmetric. Hosted a 6-person sprint review with zero packet loss or lag.",
+        "sentiment": "positive",
+        "topics": ["wifi", "workspace"]
+      },
+      {
+        "id": "rev_502",
+        "author": "Tariq A.",
+        "date": "2026-08",
+        "text": "Total peace and bird songs up on the hill. However, the driveway is steep—you definitely need a 150cc scooter or rental car. About 10 minutes drive down to Chalong Pier for morning boat trips.",
+        "sentiment": "mixed",
+        "topics": ["noise", "transport", "diving"]
+      },
+      {
+        "id": "rev_503",
+        "author": "Amara K.",
+        "date": "2026-07",
+        "text": "Sunset from the infinity pool is breathtaking. Kitchen is well-equipped for longer stays if you want to cook your own meals.",
+        "sentiment": "positive",
+        "topics": ["pool", "kitchen"]
+      }
+    ]
+  },
+  {
+    "id": "prop_phuket_03",
+    "title": "Kata Beachfront Surf & Digital Haven",
+    "location": "Kata Beach, Phuket",
+    "region": "Phuket",
+    "pricePerNightUsd": 76,
+    "rating": 4.62,
+    "reviewCount": 154,
+    "distanceToDiveCenterMins": 18,
+    "tagline": "Surf breaks and golden sands at your doorstep with casual cafe co-working vibes",
+    "listedAmenities": ["Wi-Fi", "Beach Access", "Cafe on Site", "Air Conditioning", "Balcony"],
+    "heroImage": "https://images.unsplash.com/photo-1540541338287-41700207dee6?auto=format&fit=crop&w=800&q=80",
+    "verifiedHighlights": {
+      "wifiSpeedMbps": 45,
+      "deskAvailable": false,
+      "nightNoiseLevel": "moderate",
+      "divePierWalkMins": 18
+    },
+    "reviews": [
+      {
+        "id": "rev_601",
+        "author": "Lucas P.",
+        "date": "2026-09",
+        "text": "Step directly onto Kata Beach! Perfect if your priority is catching morning waves or sunset cocktails. The on-site cafe has great iced espresso.",
+        "sentiment": "positive",
+        "topics": ["beach", "surf", "cafe"]
+      },
+      {
+        "id": "rev_602",
+        "author": "Maya N.",
+        "date": "2026-08",
+        "text": "Wi-Fi is adequate for Slack and documents (45 Mbps), but during lunch rush the cafe router struggled with heavy upload tasks. Moderate street chatter until 11 PM.",
+        "sentiment": "mixed",
+        "topics": ["wifi", "noise"]
+      },
+      {
+        "id": "rev_603",
+        "author": "Felix H.",
+        "date": "2026-07",
+        "text": "If you are doing daily dive trips out of Chalong Pier, keep in mind it's a 20-minute taxi ride each way across the Kata hill, which adds $15-20 per day in Grab costs.",
+        "sentiment": "mixed",
+        "topics": ["diving", "transport", "cost"]
+      }
+    ]
+  }
+]

@@ -1,0 +1,6 @@
+{
+  "name": "StayMatch",
+  "description": "Citation-backed semantic travel discovery and 3-way trade-off decision engine for high-consideration stays.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

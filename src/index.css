@@ -1,0 +1,38 @@
+@import "tailwindcss";
+
+@theme {
+  --font-serif: 'Playfair Display', Georgia, serif;
+  --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Space Mono', monospace;
+  --color-sandstone-50: #FBF9F5;
+  --color-sandstone-100: #F5EFE6;
+  --color-sandstone-200: #EADBCE;
+  --color-sandstone-300: #D8C3AE;
+  --color-ocean-900: #092C30;
+  --color-ocean-800: #0E4D54;
+  --color-ocean-700: #146B75;
+  --color-ocean-600: #1B8894;
+  --color-terracotta: #D97746;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: #FAF7F2;
+  color: #1B242A;
+}
+
+/* Custom scrollbar for trade-off tables & drawers */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(14, 77, 84, 0.2);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(14, 77, 84, 0.4);
+}
