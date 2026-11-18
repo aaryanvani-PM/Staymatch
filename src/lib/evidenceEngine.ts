@@ -1,4 +1,5 @@
-import { Property, Review, EvidenceCitation, PropertyEvidenceResult, DecomposedQuery, TradeOffVerdict } from '../types';
+import type { Property, Review, EvidenceCitation, PropertyEvidenceResult, DecomposedQuery, TradeOffVerdict } from '../types';
+import { CURATED_COPY } from './editorialCopy.ts';
 
 export const PRESET_QUERIES = [
   {
@@ -23,479 +24,360 @@ export const PRESET_QUERIES = [
   }
 ];
 
+export const DEFAULT_QUERY = PRESET_QUERIES[0].query;
+
+// Canonical signal labels. The Gemini decomposer may phrase signals differently;
+// classifySignal() maps any phrasing back onto one of these categories.
+export const SIGNALS = {
+  wifi: "Fast & Reliable Wi-Fi for Video Calls / Zoom",
+  noise: "Quiet Environment for Night Sleep & Focus",
+  diving: "Scuba Dive Logistics (Pier / Shops / Gear Proximity)",
+  location: "Beachfront Walkability & Sea Access",
+  workspace: "Ergonomic Workstation Setup",
+} as const;
+
+// ---------------------------------------------------------------------------
+// Text matching helpers
+// ---------------------------------------------------------------------------
+
+const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const termRegexCache = new Map<string, RegExp>();
+function termRegex(term: string): RegExp {
+  let re = termRegexCache.get(term);
+  if (!re) {
+    // Word boundaries stop "bar" matching "barely" and "sea" matching "season".
+    re = new RegExp(`(^|[^a-z0-9])${escapeRegex(term)}(?=$|[^a-z0-9])`, 'gi');
+    termRegexCache.set(term, re);
+  }
+  re.lastIndex = 0;
+  return re;
+}
+
+const NEGATORS = new Set(['no', 'not', 'never', 'without', 'zero', "didn't", 'didnt', "don't", 'dont', "doesn't", 'doesnt', "wasn't", 'wasnt', "isn't", 'isnt', 'nor', 'hardly']);
+
+/** True if `term` appears as a whole word/phrase in `text`. */
+export function mentions(text: string, term: string): boolean {
+  return termRegex(term).test(text);
+}
+
+/**
+ * True if `term` appears and is not negated by one of the four preceding words
+ * ("never cut out", "no loud music", "zero packet loss or lag").
+ */
+export function mentionsAffirmed(text: string, term: string): boolean {
+  const re = termRegex(term);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const before = text.slice(0, m.index + m[1].length).toLowerCase();
+    const prevWords = before.split(/[^a-z0-9']+/).filter(Boolean).slice(-4);
+    if (!prevWords.some(w => NEGATORS.has(w))) return true;
+  }
+  return false;
+}
+
+const anyMention = (text: string, terms: string[]) => terms.some(t => mentions(text, t));
+const anyAffirmed = (text: string, terms: string[]) => terms.some(t => mentionsAffirmed(text, t));
+
+/** Largest "N Mbps" figure quoted in a piece of text, if any. */
+export function extractMbps(text: string): number | undefined {
+  const nums = [...text.matchAll(/(\d{1,4})\s*(?:mbps|mb\/s|megabits)/gi)].map(m => parseInt(m[1], 10));
+  return nums.length ? Math.max(...nums) : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Query decomposition (rule-based fallback for when Gemini is unavailable)
+// ---------------------------------------------------------------------------
+
+const REGION_ALIASES: Record<string, string[]> = {
+  Krabi: ['krabi', 'ao nang', 'klong muang', 'railay', 'tonsai', 'ton sai'],
+  Phuket: ['phuket', 'chalong', 'rawai', 'kata', 'karon', 'nai harn', 'patong'],
+};
+
+const toNumber = (s: string) => parseInt(s.replace(/,/g, ''), 10);
+
+/** Extracts a nightly budget cap from phrasing like "under $130", "max 150", "$80-120", "$300 a night". */
+export function parseMaxPrice(q: string): number | undefined {
+  const num = String.raw`\$?\s*(\d[\d,]*)`;
+  const capPatterns = [
+    new RegExp(String.raw`(?:under|below|less than|cheaper than|no more than|up to|at most|max(?:imum)?|budget(?:\s+of)?|<=?|≤)\s*(?:usd\s*)?${num}`, 'i'),
+    new RegExp(String.raw`${num}\s*(?:usd\s*)?(?:max|maximum|or less|or under|and under|tops)`, 'i'),
+  ];
+  for (const re of capPatterns) {
+    const m = q.match(re);
+    if (m) return toNumber(m[1]);
+  }
+  // Ranges: "$80-120", "between 80 and 150", "$80 to $150"
+  const range = q.match(/\$\s*(\d[\d,]*)\s*(?:-|–|to)\s*\$?\s*(\d[\d,]*)/i)
+    || q.match(/between\s*\$?\s*(\d[\d,]*)\s*and\s*\$?\s*(\d[\d,]*)/i);
+  if (range) return Math.max(toNumber(range[1]), toNumber(range[2]));
+  // A bare "$300" or "300 a night" reads as a budget.
+  const bare = q.match(/\$\s*(\d[\d,]*)/) || q.match(/(\d[\d,]*)\s*(?:usd|dollars)?\s*(?:a|per|\/)\s*night/i);
+  if (bare) return toNumber(bare[1]);
+  return undefined;
+}
+
+const AMENITY_TERMS: Array<{ amenity: string; terms: string[] }> = [
+  { amenity: 'Pool', terms: ['pool', 'swimming pool', 'plunge pool'] },
+  { amenity: 'Dedicated Workspace', terms: ['workspace', 'desk', 'work desk', 'office chair'] },
+  { amenity: 'Parking', terms: ['parking'] },
+  { amenity: 'Kitchen', terms: ['kitchen', 'kitchenette'] },
+  { amenity: 'Gym', terms: ['gym', 'fitness'] },
+  { amenity: 'Breakfast', terms: ['breakfast'] },
+  { amenity: 'Gear Rinse', terms: ['rinse', 'rinse station', 'rinse tank'] },
+];
+
 export function decomposeQuery(rawQuery: string): DecomposedQuery {
   const q = rawQuery.toLowerCase();
-  
-  // 1. Region detection
-  let region: string | undefined = undefined;
-  if (q.includes('krabi') || q.includes('ao nang') || q.includes('klong muang') || q.includes('railay')) {
-    region = 'Krabi';
-  } else if (q.includes('phuket') || q.includes('chalong') || q.includes('rawai') || q.includes('kata')) {
-    region = 'Phuket';
+
+  // 1. Region
+  let region: string | undefined;
+  for (const [name, aliases] of Object.entries(REGION_ALIASES)) {
+    if (anyMention(q, aliases)) { region = name; break; }
   }
 
-  // 2. Max Price detection
-  let maxPrice: number | undefined = undefined;
-  const underMatch = q.match(/under\s*\$?(\d+)/i) || q.match(/<\s*\$?(\d+)/i) || q.match(/\$(\d+)\s*max/i) || q.match(/max\s*\$?(\d+)/i);
-  if (underMatch) {
-    maxPrice = parseInt(underMatch[1], 10);
-  }
+  // 2. Budget
+  const maxPrice = parseMaxPrice(q);
 
-  // 3. Amenities
-  const requiredAmenities: string[] = [];
-  if (q.includes('pool')) requiredAmenities.push('Pool');
-  if (q.includes('workspace') || q.includes('desk') || q.includes('chair')) requiredAmenities.push('Dedicated Workspace');
-  if (q.includes('parking')) requiredAmenities.push('Parking');
-  if (q.includes('kitchen')) requiredAmenities.push('Kitchen');
+  // 3. Explicit amenities (skipping negated ones like "no pool needed")
+  const requiredAmenities = AMENITY_TERMS
+    .filter(({ terms }) => anyAffirmed(q, terms))
+    .map(({ amenity }) => amenity);
 
-  // 4. Semantic Qualitative Signals
+  // 4. Qualitative signals to ground in reviews
   const semanticSignals: string[] = [];
-  
-  if (q.includes('wifi') || q.includes('wi-fi') || q.includes('zoom') || q.includes('calls') || q.includes('internet') || q.includes('fiber') || q.includes('mbps')) {
-    semanticSignals.push("Fast & Reliable Wi-Fi for Video Calls / Zoom");
+  if (anyMention(q, ['wifi', 'wi-fi', 'zoom', 'video call', 'video calls', 'calls', 'internet', 'fiber', 'fibre', 'mbps', 'bandwidth', 'remote work', 'work remotely'])) {
+    semanticSignals.push(SIGNALS.wifi);
   }
-  
-  if (q.includes('quiet') || q.includes('noise') || q.includes('sleep') || q.includes('silent') || q.includes('peaceful') || q.includes('bar')) {
-    semanticSignals.push("Quiet Environment for Night Sleep & Focus");
+  if (anyMention(q, ['quiet', 'noise', 'noisy', 'sleep', 'silent', 'peaceful', 'peace', 'calm', 'tranquil', 'light sleeper'])) {
+    semanticSignals.push(SIGNALS.noise);
   }
-
-  if (q.includes('dive') || q.includes('scuba') || q.includes('pier') || q.includes('boat') || q.includes('rinse')) {
-    semanticSignals.push("Scuba Dive Logistics (Pier / Shops / Gear Proximity)");
+  if (anyMention(q, ['dive', 'dives', 'diving', 'diver', 'divers', 'scuba', 'pier', 'dive boat', 'boats', 'padi', 'snorkel', 'snorkeling', 'snorkelling'])) {
+    semanticSignals.push(SIGNALS.diving);
   }
-
-  if (q.includes('beach') || q.includes('ocean') || q.includes('sand') || q.includes('surf')) {
-    semanticSignals.push("Beachfront Walkability & Sea Access");
+  if (anyMention(q, ['beach', 'beachfront', 'ocean', 'sand', 'surf', 'surfing', 'sea view', 'walkable', 'walking distance', 'nature', 'limestone'])) {
+    semanticSignals.push(SIGNALS.location);
   }
-
-  if (q.includes('chair') || q.includes('monitor') || q.includes('cowork') || q.includes('co-work') || q.includes('workstation')) {
-    semanticSignals.push("Ergonomic Workstation Setup");
+  if (anyMention(q, ['chair', 'monitor', 'monitors', 'cowork', 'co-work', 'coworking', 'co-working', 'workstation', 'ergonomic', 'desk', 'workspace'])) {
+    semanticSignals.push(SIGNALS.workspace);
   }
 
-  // Defaults if query was very generic
+  // A generic query gets the three signals this catalog is built around.
   if (semanticSignals.length === 0) {
-    semanticSignals.push("Fast & Reliable Wi-Fi for Video Calls / Zoom");
-    semanticSignals.push("Quiet Environment for Night Sleep & Focus");
-    semanticSignals.push("Scuba Dive Logistics (Pier / Shops / Gear Proximity)");
+    semanticSignals.push(SIGNALS.wifi, SIGNALS.noise, SIGNALS.diving);
   }
 
-  // Detect overall semantic vibe & traveler feeling
+  const has = (cat: SignalCategory) => semanticSignals.some(s => classifySignal(s) === cat);
   let detectedVibe = "Balanced Coastal Workcation & Discovery";
-  if (q.includes('zoom') || q.includes('fast wi-fi') || q.includes('fiber')) {
-    if (q.includes('quiet')) {
-      detectedVibe = "Deep Focus Workcation & Uninterrupted Rest";
-    } else if (q.includes('dive')) {
-      detectedVibe = "High-Productivity Workcation & Scuba Sanctuary";
-    }
-  } else if (q.includes('dive') || q.includes('pier')) {
-    detectedVibe = "Early Dawn Dive Expedition & Pier Proximity";
-  } else if (q.includes('nature') || q.includes('limestone') || q.includes('railay')) {
-    detectedVibe = "Car-Free Limestone Solitude & Natural Rejuvenation";
-  } else if (q.includes('executive') || q.includes('monitor')) {
-    detectedVibe = "Executive Bandwidth & Hillside Panoramic Focus";
-  }
+  if (has('wifi') && has('noise')) detectedVibe = "Deep Focus Workcation & Uninterrupted Rest";
+  else if (has('wifi') && has('diving')) detectedVibe = "High-Productivity Workcation & Scuba Sanctuary";
+  else if (has('workspace') && has('wifi')) detectedVibe = "Executive Bandwidth & Focused Work Setup";
+  else if (has('diving')) detectedVibe = "Early Dawn Dive Expedition & Pier Proximity";
+  else if (anyMention(q, ['nature', 'limestone', 'railay', 'unplug'])) detectedVibe = "Car-Free Limestone Solitude & Natural Rejuvenation";
+  else if (has('location')) detectedVibe = "Barefoot Beach Days & Easy Walkability";
+  else if (has('noise')) detectedVibe = "Restorative Quiet & Slow Mornings";
 
-  let userIntentSummary = `Looking for ${region ? region : 'Southeast Asia'} properties`;
+  let userIntentSummary = `Looking for ${region ?? 'Andaman coast'} stays`;
   if (maxPrice) userIntentSummary += ` capped at $${maxPrice}/night`;
-  userIntentSummary += ` with verified review evidence for ${semanticSignals.length} qualitative requirements.`;
+  if (requiredAmenities.length) userIntentSummary += ` with ${requiredAmenities.join(', ')}`;
+  userIntentSummary += `, checking review evidence for ${semanticSignals.length} qualitative requirement${semanticSignals.length === 1 ? '' : 's'}.`;
 
   return {
     rawQuery,
-    hardFilters: {
-      region,
-      maxPrice,
-      requiredAmenities
-    },
+    hardFilters: { region, maxPrice, requiredAmenities },
     semanticSignals,
     userIntentSummary,
     detectedVibe
   };
 }
 
-// Evaluate review corpus for a specific property against semantic cues
-export function evaluatePropertyAgainstReviewSignals(
-  property: Property,
-  signals: string[]
-): EvidenceCitation[] {
-  const citations: EvidenceCitation[] = [];
-  const reviews = property.reviews || [];
+// ---------------------------------------------------------------------------
+// Review evidence grounding
+// ---------------------------------------------------------------------------
 
-  for (const signal of signals) {
-    const sLower = signal.toLowerCase();
+export type SignalCategory = EvidenceCitation['category'];
 
-    // 1. Wi-Fi / Zoom / Work calls
-    if (sLower.includes('wi-fi') || sLower.includes('wifi') || sLower.includes('zoom') || sLower.includes('internet')) {
-      const negativeRev = reviews.find(r => 
-        r.text.toLowerCase().includes('dropped') || 
-        r.text.toLowerCase().includes('lags') || 
-        r.text.toLowerCase().includes('struggled') ||
-        (r.text.toLowerCase().includes('wi-fi') && r.text.toLowerCase().includes('not'))
-      );
-
-      const highFiberRev = reviews.find(r => 
-        r.text.toLowerCase().includes('fiber') || 
-        r.text.toLowerCase().includes('mbps') || 
-        r.text.toLowerCase().includes('zoom marathon') ||
-        r.text.toLowerCase().includes('product calls') ||
-        r.text.toLowerCase().includes('packet loss')
-      );
-
-      if (negativeRev && !highFiberRev) {
-        citations.push({
-          signalQuery: signal,
-          category: 'wifi',
-          status: 'mixed',
-          statusLabel: 'Mixed Feedback',
-          headlineSummary: 'Wi-Fi dropped during calls or lags in weather',
-          verbatimQuote: negativeRev.text,
-          reviewId: negativeRev.id,
-          author: negativeRev.author,
-          reviewDate: negativeRev.date
-        });
-      } else if (negativeRev && highFiberRev) {
-        citations.push({
-          signalQuery: signal,
-          category: 'wifi',
-          status: 'mixed',
-          statusLabel: 'Mixed Feedback',
-          headlineSummary: 'Good speeds but potential peak-hour dropoffs reported',
-          verbatimQuote: negativeRev.text,
-          reviewId: negativeRev.id,
-          author: negativeRev.author,
-          reviewDate: negativeRev.date
-        });
-      } else if (highFiberRev) {
-        citations.push({
-          signalQuery: signal,
-          category: 'wifi',
-          status: 'verified',
-          statusLabel: 'Verified by Guests',
-          headlineSummary: `Consistently verified fiber connection (${property.verifiedHighlights.wifiSpeedMbps || 185} Mbps)`,
-          verbatimQuote: highFiberRev.text,
-          reviewId: highFiberRev.id,
-          author: highFiberRev.author,
-          reviewDate: highFiberRev.date
-        });
-      } else {
-        const generalWifiRev = reviews.find(r => r.text.toLowerCase().includes('wi-fi') || r.text.toLowerCase().includes('wifi'));
-        if (generalWifiRev) {
-          citations.push({
-            signalQuery: signal,
-            category: 'wifi',
-            status: 'verified',
-            statusLabel: 'Verified by Guests',
-            headlineSummary: 'Standard connection adequate for general browsing',
-            verbatimQuote: generalWifiRev.text,
-            reviewId: generalWifiRev.id,
-            author: generalWifiRev.author,
-            reviewDate: generalWifiRev.date
-          });
-        } else {
-          citations.push({
-            signalQuery: signal,
-            category: 'wifi',
-            status: 'unmentioned',
-            statusLabel: 'Not Mentioned in Reviews',
-            headlineSummary: 'No guest reviews have explicitly verified video call bandwidth',
-          });
-        }
-      }
-      continue;
-    }
-
-    // 2. Quiet environment / Noise / Sleep
-    if (sLower.includes('quiet') || sLower.includes('noise') || sLower.includes('sleep')) {
-      const noisyRev = reviews.find(r => 
-        r.text.toLowerCase().includes('bar') || 
-        r.text.toLowerCase().includes('blasts bass') || 
-        r.text.toLowerCase().includes('music') || 
-        r.text.toLowerCase().includes('do not book this if you need to') ||
-        r.text.toLowerCase().includes('street chatter')
-      );
-
-      const quietRev = reviews.find(r => 
-        r.text.toLowerCase().includes('dead quiet') || 
-        r.text.toLowerCase().includes('super quiet') || 
-        r.text.toLowerCase().includes('cul-de-sac') || 
-        r.text.toLowerCase().includes('zero cars') ||
-        r.text.toLowerCase().includes('double-glazed') ||
-        r.text.toLowerCase().includes('total peace')
-      );
-
-      if (noisyRev) {
-        citations.push({
-          signalQuery: signal,
-          category: 'noise',
-          status: 'mixed',
-          statusLabel: 'Mixed Feedback',
-          headlineSummary: 'Bar music or street chatter noted past midnight',
-          verbatimQuote: noisyRev.text,
-          reviewId: noisyRev.id,
-          author: noisyRev.author,
-          reviewDate: noisyRev.date
-        });
-      } else if (quietRev) {
-        citations.push({
-          signalQuery: signal,
-          category: 'noise',
-          status: 'verified',
-          statusLabel: 'Verified by Guests',
-          headlineSummary: 'Dead quiet nocturnal environment verified by multiple guests',
-          verbatimQuote: quietRev.text,
-          reviewId: quietRev.id,
-          author: quietRev.author,
-          reviewDate: quietRev.date
-        });
-      } else {
-        citations.push({
-          signalQuery: signal,
-          category: 'noise',
-          status: 'unmentioned',
-          statusLabel: 'Not Mentioned in Reviews',
-          headlineSummary: 'Ambient night noise levels not cited in available reviews'
-        });
-      }
-      continue;
-    }
-
-    // 3. Dive Logistics (Pier, Dive Center, Rinse station)
-    if (sLower.includes('dive') || sLower.includes('scuba') || sLower.includes('pier')) {
-      const diveRev = reviews.find(r => 
-        r.text.toLowerCase().includes('dive') || 
-        r.text.toLowerCase().includes('padi') || 
-        r.text.toLowerCase().includes('chalong pier') ||
-        r.text.toLowerCase().includes('longtail') ||
-        r.text.toLowerCase().includes('rinse tank') ||
-        r.text.toLowerCase().includes('boat departures')
-      );
-
-      const distantDiveRev = reviews.find(r =>
-        r.text.toLowerCase().includes('20-minute taxi') ||
-        r.text.toLowerCase().includes('commute across the kata hill')
-      );
-
-      if (distantDiveRev && property.distanceToDiveCenterMins > 10) {
-        citations.push({
-          signalQuery: signal,
-          category: 'diving',
-          status: 'mixed',
-          statusLabel: 'Mixed Feedback',
-          headlineSummary: `Distance penalty: ~${property.distanceToDiveCenterMins} mins commute each way to primary boat pier`,
-          verbatimQuote: distantDiveRev.text,
-          reviewId: distantDiveRev.id,
-          author: distantDiveRev.author,
-          reviewDate: distantDiveRev.date
-        });
-      } else if (diveRev) {
-        citations.push({
-          signalQuery: signal,
-          category: 'diving',
-          status: 'verified',
-          statusLabel: 'Verified by Guests',
-          headlineSummary: `Prime dive location (${property.distanceToDiveCenterMins} mins to departure pier or dive center)`,
-          verbatimQuote: diveRev.text,
-          reviewId: diveRev.id,
-          author: diveRev.author,
-          reviewDate: diveRev.date
-        });
-      } else {
-        citations.push({
-          signalQuery: signal,
-          category: 'diving',
-          status: 'unmentioned',
-          statusLabel: 'Not Mentioned in Reviews',
-          headlineSummary: 'Guest reviews do not mention scuba dive facilities or boat departures'
-        });
-      }
-      continue;
-    }
-
-    // 4. Ergonomic workspace / desk / monitors
-    if (sLower.includes('workstation') || sLower.includes('workspace') || sLower.includes('ergonomic') || sLower.includes('monitor')) {
-      const workspaceRev = reviews.find(r => 
-        r.text.toLowerCase().includes('chair') || 
-        r.text.toLowerCase().includes('desk') || 
-        r.text.toLowerCase().includes('monitor') || 
-        r.text.toLowerCase().includes('study') ||
-        r.text.toLowerCase().includes('co-working lounge')
-      );
-
-      const noDeskRev = reviews.find(r => 
-        r.text.toLowerCase().includes('no proper desk') || 
-        r.text.toLowerCase().includes('low coffee table')
-      );
-
-      if (noDeskRev) {
-        citations.push({
-          signalQuery: signal,
-          category: 'workspace',
-          status: 'mixed',
-          statusLabel: 'Mixed Feedback',
-          headlineSummary: 'Lacks ergonomic work desk (only coffee table / lounge furniture)',
-          verbatimQuote: noDeskRev.text,
-          reviewId: noDeskRev.id,
-          author: noDeskRev.author,
-          reviewDate: noDeskRev.date
-        });
-      } else if (workspaceRev) {
-        citations.push({
-          signalQuery: signal,
-          category: 'workspace',
-          status: 'verified',
-          statusLabel: 'Verified by Guests',
-          headlineSummary: 'Confirmed dedicated workspace with ergonomic seating or monitor access',
-          verbatimQuote: workspaceRev.text,
-          reviewId: workspaceRev.id,
-          author: workspaceRev.author,
-          reviewDate: workspaceRev.date
-        });
-      } else {
-        citations.push({
-          signalQuery: signal,
-          category: 'workspace',
-          status: 'unmentioned',
-          statusLabel: 'Not Mentioned in Reviews',
-          headlineSummary: 'No explicit guest testimony regarding dedicated laptop desk setup'
-        });
-      }
-      continue;
-    }
-
-    // 5. Beachfront / Location
-    const locationRev = reviews.find(r => 
-      r.text.toLowerCase().includes('beach') || 
-      r.text.toLowerCase().includes('sea') || 
-      r.text.toLowerCase().includes('scooter') || 
-      r.text.toLowerCase().includes('cul-de-sac') ||
-      r.text.toLowerCase().includes('walk')
-    );
-
-    if (locationRev) {
-      citations.push({
-        signalQuery: signal,
-        category: 'location',
-        status: 'verified',
-        statusLabel: 'Verified by Guests',
-        headlineSummary: 'Atmosphere and accessibility validated in recent guest reviews',
-        verbatimQuote: locationRev.text,
-        reviewId: locationRev.id,
-        author: locationRev.author,
-        reviewDate: locationRev.date
-      });
-    } else {
-      citations.push({
-        signalQuery: signal,
-        category: 'location',
-        status: 'unmentioned',
-        statusLabel: 'Not Mentioned in Reviews',
-        headlineSummary: 'No direct guest mentions found for this criteria'
-      });
-    }
-  }
-
-  return citations;
+/** Maps any signal phrasing (canonical or model-generated) onto a category. */
+export function classifySignal(signal: string): SignalCategory {
+  const s = signal.toLowerCase();
+  if (anyMention(s, ['wi-fi', 'wifi', 'zoom', 'internet', 'bandwidth', 'fiber', 'fibre', 'connection', 'video calls', 'video call', 'mbps'])) return 'wifi';
+  if (anyMention(s, ['quiet', 'noise', 'sleep', 'silent', 'peaceful', 'calm'])) return 'noise';
+  if (anyMention(s, ['dive', 'diving', 'scuba', 'pier', 'padi', 'snorkel', 'snorkeling'])) return 'diving';
+  if (anyMention(s, ['workstation', 'workspace', 'ergonomic', 'monitor', 'monitors', 'desk', 'chair', 'co-working', 'coworking'])) return 'workspace';
+  if (anyMention(s, ['beach', 'sea', 'walk', 'walkable', 'walkability', 'location', 'nature', 'surf'])) return 'location';
+  return 'general';
 }
 
-export function filterAndScoreProperties(
-  properties: Property[],
-  decomposed: DecomposedQuery
-): PropertyEvidenceResult[] {
+const WIFI_TERMS = ['wi-fi', 'wifi', 'internet', 'fiber', 'fibre', 'connection', 'router', 'mbps'];
+const WIFI_NEGATIVE = ['dropped', 'drops', 'drop out', 'lag', 'lags', 'lagged', 'laggy', 'struggled', 'struggles', 'cut out', 'cuts out', 'spotty', 'patchy', 'unreliable', 'slow', 'froze', 'freezes', 'packet loss', 'disconnects', 'throttles'];
+const WIFI_POSITIVE = ['fast', 'fastest', 'stable', 'reliable', 'zoom marathon', 'zoom marathons', 'product calls', 'sprint review', 'symmetric'];
+
+const NOISE_NEGATIVE = ['bar', 'bars', 'club', 'nightclub', 'bass', 'music', 'loud', 'noisy', 'party', 'parties', 'karaoke', 'street chatter', 'chatter', 'traffic noise', 'thin walls', 'construction', 'roosters', 'rooster', 'do not book this if you need to'];
+const NOISE_POSITIVE = ['dead quiet', 'super quiet', 'very quiet', 'quiet', 'peaceful', 'silent', 'cul-de-sac', 'zero cars', 'double-glazed', 'total peace', 'only to birds', 'bird songs'];
+
+const DIVE_TERMS = ['dive', 'diving', 'divers', 'scuba', 'padi', 'pier', 'longtail', 'rinse tank', 'boat departures', 'day boats', 'boat trips', 'dive shop', 'dive center'];
+
+const WORKSPACE_NEGATIVE = ['no proper desk', 'no desk', 'low coffee table', 'no chair', 'uncomfortable chair', 'nowhere to work'];
+const WORKSPACE_POSITIVE = ['desk', 'proper desk', 'ergonomic', 'chair', 'monitor', 'monitors', 'study', 'co-working', 'coworking', 'co-working lounge', 'workspace'];
+
+const LOCATION_TERMS = ['beach', 'sea', 'sea arches', 'sand', 'waves', 'walk', 'walking', 'boardwalk', 'scooter', 'cul-de-sac', 'cliffs', 'views'];
+
+function cite(signal: string, category: SignalCategory, status: EvidenceCitation['status'], headlineSummary: string, review?: Review): EvidenceCitation {
+  const statusLabel = status === 'verified' ? 'Verified by Guests' : status === 'mixed' ? 'Mixed Feedback' : 'Not Mentioned in Reviews';
+  return {
+    signalQuery: signal,
+    category,
+    status,
+    statusLabel,
+    headlineSummary,
+    ...(review ? { verbatimQuote: review.text, reviewId: review.id, author: review.author, reviewDate: review.date } : {})
+  };
+}
+
+function evaluateWifi(signal: string, property: Property, reviews: Review[]): EvidenceCitation {
+  const wifiReviews = reviews.filter(r => anyMention(r.text, WIFI_TERMS));
+  const negative = wifiReviews.find(r => anyAffirmed(r.text, WIFI_NEGATIVE));
+  const quoted = wifiReviews
+    .map(r => ({ r, mbps: extractMbps(r.text) }))
+    .filter((x): x is { r: Review; mbps: number } => x.mbps !== undefined)
+    .sort((a, b) => b.mbps - a.mbps)[0];
+  const positive = (quoted && quoted.mbps >= 50 ? quoted.r : undefined)
+    ?? wifiReviews.find(r => anyAffirmed(r.text, WIFI_POSITIVE) && r !== negative);
+
+  if (negative && positive && positive !== negative) {
+    return cite(signal, 'wifi', 'mixed', 'Good speeds reported, but other guests saw drop-offs', negative);
+  }
+  if (negative) {
+    const speed = quoted ? ` (~${quoted.mbps} Mbps)` : '';
+    return cite(signal, 'wifi', 'mixed', `Guests report drops or lag on calls${speed}`, negative);
+  }
+  if (positive) {
+    const mbps = quoted?.mbps ?? property.verifiedHighlights.wifiSpeedMbps;
+    return cite(signal, 'wifi', 'verified', mbps ? `Guests measured ~${mbps} Mbps and stable video calls` : 'Guests report stable video calls', positive);
+  }
+  if (quoted) {
+    return cite(signal, 'wifi', 'mixed', `Around ${quoted.mbps} Mbps: fine for email, marginal for video calls`, quoted.r);
+  }
+  if (wifiReviews[0]) {
+    return cite(signal, 'wifi', 'mixed', 'Wi-Fi mentioned, but no guest confirms it handles video calls', wifiReviews[0]);
+  }
+  return cite(signal, 'wifi', 'unmentioned', 'No guest reviews confirm video-call bandwidth');
+}
+
+function evaluateNoise(signal: string, reviews: Review[]): EvidenceCitation {
+  const noisy = reviews.find(r => anyAffirmed(r.text, NOISE_NEGATIVE));
+  const quiet = reviews.find(r => anyAffirmed(r.text, NOISE_POSITIVE));
+  if (noisy) return cite(signal, 'noise', 'mixed', 'Guests mention music, bars or street noise at night', noisy);
+  if (quiet) return cite(signal, 'noise', 'verified', 'Guests describe quiet nights', quiet);
+  return cite(signal, 'noise', 'unmentioned', 'Night-time noise is not mentioned in available reviews');
+}
+
+function evaluateDiving(signal: string, property: Property, reviews: Review[]): EvidenceCitation {
+  const mins = property.distanceToDiveCenterMins;
+  const diveRev = reviews.find(r => anyMention(r.text, DIVE_TERMS));
+  if (mins > 10) {
+    const farRev = reviews.find(r => anyMention(r.text, ['taxi', 'commute', 'drive', 'grab'])) ?? diveRev;
+    return cite(signal, 'diving', 'mixed', `~${mins} min each way to the dive boats`, farRev);
+  }
+  if (diveRev) return cite(signal, 'diving', 'verified', `${mins} min to the dive pier or dive center`, diveRev);
+  return cite(signal, 'diving', 'unmentioned', 'Reviews do not mention dive shops or boat departures');
+}
+
+function evaluateWorkspace(signal: string, reviews: Review[]): EvidenceCitation {
+  const noDesk = reviews.find(r => anyMention(r.text, WORKSPACE_NEGATIVE));
+  if (noDesk) return cite(signal, 'workspace', 'mixed', 'No proper desk; guests worked from lounge furniture', noDesk);
+  const desk = reviews.find(r => anyAffirmed(r.text, WORKSPACE_POSITIVE));
+  if (desk) return cite(signal, 'workspace', 'verified', 'Guests confirm a real desk, chair or monitor setup', desk);
+  return cite(signal, 'workspace', 'unmentioned', 'No guest mentions a laptop desk setup');
+}
+
+function evaluateLocation(signal: string, reviews: Review[]): EvidenceCitation {
+  const rev = reviews.find(r => anyMention(r.text, LOCATION_TERMS));
+  if (rev) return cite(signal, 'location', 'verified', 'Setting and access described in guest reviews', rev);
+  return cite(signal, 'location', 'unmentioned', 'No guest mentions found for this criterion');
+}
+
+/** Grounds each requested signal in the property's reviews. */
+export function evaluatePropertyAgainstReviewSignals(property: Property, signals: string[]): EvidenceCitation[] {
+  const reviews = property.reviews || [];
+  return signals.map(signal => {
+    switch (classifySignal(signal)) {
+      case 'wifi': return evaluateWifi(signal, property, reviews);
+      case 'noise': return evaluateNoise(signal, reviews);
+      case 'diving': return evaluateDiving(signal, property, reviews);
+      case 'workspace': return evaluateWorkspace(signal, reviews);
+      default: return evaluateLocation(signal, reviews);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Scoring
+// ---------------------------------------------------------------------------
+
+/** Loose amenity match: "Pool" matches "Infinity Pool", "Kitchen" matches "Kitchenette", "Parking" matches "Free Parking". */
+export function hasAmenity(property: Property, amenity: string): boolean {
+  const want = amenity.toLowerCase();
+  const synonyms: Record<string, string[]> = {
+    'dedicated workspace': ['workspace', 'desk', 'co-working'],
+    'gear rinse': ['rinse'],
+  };
+  const needles = synonyms[want] ?? [want];
+  return property.listedAmenities.some(a => needles.some(n => a.toLowerCase().includes(n)));
+}
+
+function regionMatches(property: Property, region: string): boolean {
+  const r = region.toLowerCase();
+  return property.region.toLowerCase() === r || property.location.toLowerCase().includes(r);
+}
+
+function deriveTradeOffNote(property: Property, badges: EvidenceCitation[]): string {
+  const good = badges.find(b => b.status === 'verified');
+  const bad = badges.find(b => b.status === 'mixed') ?? badges.find(b => b.status === 'unmentioned');
+  if (good && bad) return `${good.headlineSummary}, but ${bad.headlineSummary.charAt(0).toLowerCase()}${bad.headlineSummary.slice(1)}.`;
+  if (good) return `${good.headlineSummary}; no review red flags for your criteria.`;
+  if (bad) return `${bad.headlineSummary}.`;
+  return property.tagline;
+}
+
+export function filterAndScoreProperties(properties: Property[], decomposed: DecomposedQuery): PropertyEvidenceResult[] {
   const { hardFilters, semanticSignals } = decomposed;
 
   return properties.map(property => {
     const hardFilterReasons: string[] = [];
-    let hardFilterMatch = true;
 
-    // Region check
-    if (hardFilters.region) {
-      const matchRegion = property.region.toLowerCase() === hardFilters.region.toLowerCase() ||
-        property.location.toLowerCase().includes(hardFilters.region.toLowerCase());
-      if (!matchRegion) {
-        hardFilterMatch = false;
-        hardFilterReasons.push(`Located in ${property.region}, not ${hardFilters.region}`);
-      }
+    if (hardFilters.region && !regionMatches(property, hardFilters.region)) {
+      hardFilterReasons.push(`Located in ${property.region}, not ${hardFilters.region}`);
     }
-
-    // Price check
     if (hardFilters.maxPrice && property.pricePerNightUsd > hardFilters.maxPrice) {
-      hardFilterMatch = false;
       hardFilterReasons.push(`$${property.pricePerNightUsd}/night exceeds budget of $${hardFilters.maxPrice}`);
     }
-
-    // Amenity checks
-    if (hardFilters.requiredAmenities && hardFilters.requiredAmenities.length > 0) {
-      for (const req of hardFilters.requiredAmenities) {
-        const hasAmenity = property.listedAmenities.some(a => a.toLowerCase().includes(req.toLowerCase()));
-        if (!hasAmenity) {
-          hardFilterReasons.push(`Missing listed amenity: ${req}`);
-        }
-      }
+    if (hardFilters.minRating && property.rating < hardFilters.minRating) {
+      hardFilterReasons.push(`Rated ${property.rating}, below ${hardFilters.minRating}`);
     }
+    for (const req of hardFilters.requiredAmenities ?? []) {
+      if (!hasAmenity(property, req)) hardFilterReasons.push(`Missing listed amenity: ${req}`);
+    }
+    const hardFilterMatch = hardFilterReasons.length === 0;
 
-    // Evidence badges
     const evidenceBadges = evaluatePropertyAgainstReviewSignals(property, semanticSignals);
 
-    // Qualitative score calculation
-    let score = property.rating * 15; // base 70-75 pts
+    // Rating sets the baseline (~70); each verified signal adds, each mixed one subtracts.
+    let score = property.rating * 15;
     for (const badge of evidenceBadges) {
       if (badge.status === 'verified') score += 10;
       else if (badge.status === 'mixed') score -= 5;
     }
     if (!hardFilterMatch) score -= 30;
 
-    // Strengths
     const strengths: string[] = [];
-    if (property.verifiedHighlights.wifiSpeedMbps && property.verifiedHighlights.wifiSpeedMbps > 100) {
-      strengths.push(`${property.verifiedHighlights.wifiSpeedMbps} Mbps Fiber Wi-Fi`);
-    }
-    if (property.verifiedHighlights.nightNoiseLevel === 'dead quiet') {
-      strengths.push("Dead quiet nocturnal cul-de-sac / double glazing");
-    }
-    if (property.distanceToDiveCenterMins <= 5) {
-      strengths.push(`${property.distanceToDiveCenterMins} min access to dive boats`);
-    }
-    if (property.listedAmenities.includes('Dedicated Workspace')) {
-      strengths.push("Ergonomic study workstation");
-    }
+    const mbps = property.verifiedHighlights.wifiSpeedMbps;
+    if (mbps && mbps >= 100) strengths.push(`${mbps} Mbps Fiber Wi-Fi`);
+    if (property.verifiedHighlights.nightNoiseLevel === 'dead quiet') strengths.push("Quiet at night");
+    if (property.distanceToDiveCenterMins <= 5) strengths.push(`${property.distanceToDiveCenterMins} min to dive boats`);
+    if (hasAmenity(property, 'Dedicated Workspace')) strengths.push("Dedicated workspace");
 
-    // Planted trade-off note
-    let tradeOffNote = "";
-    if (property.id === 'prop_krabi_01') {
-      tradeOffNote = "Outstanding fiber bandwidth & silence, but requires scooter for Ao Nang restaurants.";
-    } else if (property.id === 'prop_krabi_02') {
-      tradeOffNote = "Unbeatable 2-min pier proximity and low price, but loud bar music and fragile Wi-Fi.";
-    } else if (property.id === 'prop_krabi_03') {
-      tradeOffNote = "Stunning limestone peacefulness, but lacks an ergonomic desk and Wi-Fi lags in storms.";
-    } else if (property.id === 'prop_phuket_01') {
-      tradeOffNote = "Exceptional co-working setup & 3-min pier walk, but boat harbor rather than soft sand beach.";
-    } else if (property.id === 'prop_phuket_02') {
-      tradeOffNote = "Blazing 300 Mbps fiber & infinity pool serenity, but steep hillside requires 150cc scooter.";
-    } else if (property.id === 'prop_phuket_03') {
-      tradeOffNote = "Direct surf beach access & cafe atmosphere, but 20-min daily commute to scuba boats.";
-    }
-
-    // Rich semantic vibe & sensory feeling
-    let vibeAtmosphere = property.vibeAtmosphere || "Quiet tropical residential hideaway";
-    let travelerFeeling = property.travelerFeeling || "Relaxed, authentic, and connected to nature.";
-
-    if (property.id === 'prop_krabi_01') {
-      vibeAtmosphere = "Sun-drenched teak seclusion & gentle jungle birdsong";
-      travelerFeeling = "Calm, deeply productive, and completely in the flow during Zoom calls, with a private plunge pool reward at sunset.";
-    } else if (property.id === 'prop_krabi_02') {
-      vibeAtmosphere = "Electric pierfront salt breeze & late-night acoustic bass";
-      travelerFeeling = "Thrilled by 3-minute boat access and lively dive energy, but drained if you need quiet sleep before 1 AM.";
-    } else if (property.id === 'prop_krabi_03') {
-      vibeAtmosphere = "Towering limestone amphitheater & tropical morning mist";
-      travelerFeeling = "Completely grounded and disconnected from urban stress, though antsy if you need a high-speed video upload.";
-    } else if (property.id === 'prop_phuket_01') {
-      vibeAtmosphere = "Purpose-built maritime efficiency & focused diver community";
-      travelerFeeling = "Unstoppable momentum: finishing 3 deep reef dives by afternoon and jumping straight into product calls with dual monitors.";
-    } else if (property.id === 'prop_phuket_02') {
-      vibeAtmosphere = "Panoramic Andaman Sea infinity views & breezy hill silence";
-      travelerFeeling = "Inspiring executive retreat with total acoustic peace, provided you're comfortable riding a scooter up the steep hill.";
-    } else if (property.id === 'prop_phuket_03') {
-      vibeAtmosphere = "Golden-hour surf breaks & vibrant coastal cafe chatter";
-      travelerFeeling = "Carefree and sun-kissed with surfboards at the door, but slightly weary if commuting across the island daily for scuba boats.";
-    }
+    const curated = CURATED_COPY[property.id];
 
     return {
       property,
@@ -504,201 +386,196 @@ export function filterAndScoreProperties(
       evidenceBadges,
       score: Math.max(20, Math.min(99, Math.round(score))),
       strengths,
-      tradeOffNote,
-      vibeAtmosphere,
-      travelerFeeling
+      tradeOffNote: curated?.tradeOffNote ?? deriveTradeOffNote(property, evidenceBadges),
+      vibeAtmosphere: curated?.cardVibe ?? property.vibeAtmosphere ?? property.tagline,
+      travelerFeeling: curated?.cardFeeling ?? property.travelerFeeling ?? "Relaxed, unhurried, and close to the water."
     };
-  }).sort((a, b) => {
-    // Sort matching hard filters first, then score
-    if (a.hardFilterMatch && !b.hardFilterMatch) return -1;
-    if (!a.hardFilterMatch && b.hardFilterMatch) return 1;
-    return b.score - a.score;
-  });
+  }).sort(compareByMatchThenScore);
 }
 
-// 3-Way Smart Trade-Off Synthesizer
-// 3-Way Smart Trade-Off Synthesizer: Refactored to utilize Gemini API with an editorial-style travel expert persona
-export async function synthesizeTradeOffVerdict(
-  pinnedProperties: Property[],
-  userQuery: string
-): Promise<TradeOffVerdict> {
-  if (pinnedProperties.length === 0) {
-    return {
-      pinnedProperties: [],
-      overallVerdict: "No stays currently pinned. Select 2 or 3 properties to receive our Travel Editor's executive trade-off synthesis.",
-      comparisonMatrix: [],
-      executiveRecommendation: "Pin at least two listings to contrast qualitative nuances, emotional feelings, and local trade-offs."
-    };
-  }
+/** Properties that pass every hard filter come first; ties broken by score. */
+export function compareByMatchThenScore(a: PropertyEvidenceResult, b: PropertyEvidenceResult): number {
+  if (a.hardFilterMatch !== b.hardFilterMatch) return a.hardFilterMatch ? -1 : 1;
+  return b.score - a.score;
+}
 
-  // 1. First, attempt to invoke the server-side Gemini API endpoint for live model synthesis
-  if (typeof fetch === 'function') {
-    try {
-      const response = await fetch('/api/tradeoff', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          properties: pinnedProperties,
-          query: userQuery,
-        }),
-      });
+// ---------------------------------------------------------------------------
+// Trade-off synthesis (rule-based fallback for when Gemini is unavailable)
+// ---------------------------------------------------------------------------
 
-      if (response.ok) {
-        const data = await response.json();
-        if (data && data.comparisonMatrix && data.comparisonMatrix.length > 0) {
-          return data as TradeOffVerdict;
-        }
-      }
-    } catch {
-      // Gracefully fall through to the editorial expert synthesizer
+function wifiLine(p: Property): string {
+  const mbps = p.verifiedHighlights.wifiSpeedMbps;
+  const wifi = evaluateWifi(SIGNALS.wifi, p, p.reviews || []);
+  const who = wifi.author ? ` — ${wifi.author}` : '';
+  if (wifi.status === 'mixed') return `🟡 ${mbps ? `${mbps} Mbps, ` : ''}${wifi.headlineSummary.toLowerCase()}${who}`;
+  if (!mbps) return wifi.status === 'verified' ? `🟢 ${wifi.headlineSummary}${who}` : '⚪ Unverified by guests';
+  if (mbps >= 100) return `🟢 ${mbps} Mbps fiber${who}`;
+  if (mbps >= 40) return `🟡 ${mbps} Mbps, fine for Slack and email`;
+  return `🔴 ${mbps} Mbps, risky for video calls`;
+}
+
+function noiseLine(p: Property): string {
+  const level = p.verifiedHighlights.nightNoiseLevel;
+  const ev = evaluateNoise(SIGNALS.noise, p.reviews || []);
+  if (level === 'loud late night' || (!level && ev.status === 'mixed')) return `🔴 Loud at night (${ev.headlineSummary.toLowerCase()})`;
+  if (level === 'moderate') return '🟡 Moderate (some street or cafe noise in the evening)';
+  if (level === 'dead quiet' || ev.status === 'verified') return '🟢 Quiet at night';
+  return '⚪ Not mentioned in reviews';
+}
+
+function diveLine(p: Property): string {
+  const m = p.distanceToDiveCenterMins;
+  if (m <= 3) return `Doorstep: ${m} min to the dive boats`;
+  if (m <= 10) return `${m} min to the dive center or pier`;
+  return `${m} min each way to the dive boats`;
+}
+
+function deriveDrawerCopy(p: Property) {
+  const mbps = p.verifiedHighlights.wifiSpeedMbps ?? 0;
+  const quiet = p.verifiedHighlights.nightNoiseLevel === 'dead quiet';
+  const loud = p.verifiedHighlights.nightNoiseLevel === 'loud late night';
+  const dive = p.distanceToDiveCenterMins;
+  const whatYouGain: string[] = [];
+  const whatYouSacrifice: string[] = [];
+
+  if (mbps >= 100) whatYouGain.push(`${mbps} Mbps Wi-Fi, enough for back-to-back video calls.`);
+  else if (mbps > 0 && mbps < 40) whatYouSacrifice.push(`Only ~${mbps} Mbps Wi-Fi; video calls are a gamble.`);
+  if (quiet) whatYouGain.push('Quiet nights for proper sleep.');
+  if (loud) whatYouSacrifice.push('Late-night noise; light sleepers will struggle.');
+  if (dive <= 5) whatYouGain.push(`${dive} min to the dive boats.`);
+  else if (dive > 10) whatYouSacrifice.push(`${dive} min each way to the dive boats.`);
+  if (hasAmenity(p, 'Dedicated Workspace')) whatYouGain.push('A listed dedicated workspace.');
+  else whatYouSacrifice.push('No dedicated workspace listed.');
+  if (hasAmenity(p, 'Pool')) whatYouGain.push('A pool on site.');
+
+  const forWork = mbps >= 100 && !loud;
+  const forDiving = dive <= 5;
+  const bestSuitedFor = forWork && forDiving ? 'Remote workers who dive before or after their calls.'
+    : forWork ? 'Remote workers who need reliable calls and quiet focus.'
+    : forDiving ? 'Divers who want to be close to the boats.'
+    : 'Travelers prioritising setting and price over work or dive logistics.';
+  const notIdealFor = !forWork ? 'Anyone with a full day of video calls.'
+    : dive > 10 ? 'Divers on daily boat trips.'
+    : 'Travelers looking for nightlife on the doorstep.';
+
+  return {
+    vibeAtmosphere: p.vibeAtmosphere ?? p.tagline,
+    travelerFeeling: p.travelerFeeling ?? (forWork ? 'Focused and settled.' : 'Relaxed and unhurried.'),
+    whatYouGain, whatYouSacrifice, bestSuitedFor, notIdealFor,
+  };
+}
+
+type Priority = 'wifi' | 'noise' | 'diving' | 'price';
+
+const NOISE_RANK: Record<string, number> = { 'dead quiet': 0, 'moderate': 1, 'loud late night': 2 };
+
+/** Picks the strongest property on one dimension; ties go to the cheaper stay. */
+function bestFor(props: Property[], priority: Priority): Property {
+  const key = (p: Property): number => {
+    switch (priority) {
+      case 'wifi': return -(p.verifiedHighlights.wifiSpeedMbps ?? 0);
+      case 'noise': return NOISE_RANK[p.verifiedHighlights.nightNoiseLevel ?? ''] ?? 1;
+      case 'diving': return p.distanceToDiveCenterMins;
+      case 'price': return p.pricePerNightUsd;
     }
-  }
-
-  // 2. High-fidelity travel editor persona fallback with emotional context and descriptive local insights
-  return synthesizeEditorialVerdictSync(pinnedProperties, userQuery);
+  };
+  return [...props].sort((a, b) => key(a) - key(b) || a.pricePerNightUsd - b.pricePerNightUsd)[0];
 }
 
-// Synchronous high-fidelity editorial synthesizer adopting a knowledgeable travel expert persona
-export function synthesizeEditorialVerdictSync(
-  pinnedProperties: Property[],
-  userQuery: string
-): TradeOffVerdict {
+const PRIORITY_PHRASE: Record<Priority, (p: Property) => string> = {
+  wifi: p => `daily video calls are non-negotiable, choose ${p.title} (${p.verifiedHighlights.wifiSpeedMbps ?? '?'} Mbps)`,
+  noise: p => `sleep comes first, choose ${p.title} (${p.verifiedHighlights.nightNoiseLevel ?? 'quietest of the set'})`,
+  diving: p => `you're mainly here to dive, choose ${p.title} (${p.distanceToDiveCenterMins} min to the boats)`,
+  price: p => `budget leads, choose ${p.title} at $${p.pricePerNightUsd}/night`,
+};
+
+/** Orders priorities by what the traveler asked for, then fills in the rest. */
+function prioritiesFromQuery(userQuery: string): Priority[] {
+  const asked: Priority[] = [];
+  if (userQuery.trim()) {
+    for (const s of decomposeQuery(userQuery).semanticSignals) {
+      const c = classifySignal(s);
+      if ((c === 'wifi' || c === 'workspace') && !asked.includes('wifi')) asked.push('wifi');
+      if (c === 'noise' && !asked.includes('noise')) asked.push('noise');
+      if (c === 'diving' && !asked.includes('diving')) asked.push('diving');
+    }
+    if (/\b(cheap|budget|under|affordable|value)\b/i.test(userQuery) && !asked.includes('price')) asked.push('price');
+  }
+  for (const p of ['wifi', 'noise', 'diving', 'price'] as Priority[]) if (!asked.includes(p)) asked.push(p);
+  return asked;
+}
+
+export function synthesizeEditorialVerdictSync(pinnedProperties: Property[], userQuery: string): TradeOffVerdict {
   if (pinnedProperties.length === 0) {
     return {
       pinnedProperties: [],
-      overallVerdict: "No stays pinned. Select 2 or 3 properties to receive our Travel Editor's executive synthesis.",
+      overallVerdict: "No stays pinned. Select 2 or 3 properties to compare their trade-offs.",
       comparisonMatrix: [],
-      executiveRecommendation: "Pin at least two listings to contrast qualitative nuances and local trade-offs."
+      executiveRecommendation: "Pin at least two listings to see what each one gives up."
     };
   }
 
   const comparisonMatrix = pinnedProperties.map(prop => {
-    const whatYouGain: string[] = [];
-    const whatYouSacrifice: string[] = [];
-    let bestSuitedFor = "";
-    let notIdealFor = "";
-    let wifiRating = "";
-    let noiseVerdict = "";
-    let divingLogistics = "";
-    let vibeAtmosphere = prop.vibeAtmosphere || "Curated coastal residence";
-    let travelerFeeling = prop.travelerFeeling || "Relaxed, genuine, and unhurried.";
-
-    if (prop.id === 'prop_krabi_01') {
-      vibeAtmosphere = "Sun-drenched teak seclusion & jungle canopy birdsong in Klong Muang";
-      travelerFeeling = "Calm, deeply productive, and completely in the flow during high-stakes video calls, with private plunge pool solace at sunset.";
-      whatYouGain.push("185 Mbps verified symmetric fiber—unflinching bandwidth that guarantees zero frozen frames during 4-hour Zoom marathons.");
-      whatYouGain.push("Acoustic sanctuary: tucked inside a residential cul-de-sac far from the highway, waking only to morning tropical birds.");
-      whatYouGain.push("Private plunge pool surrounded by frangipani trees and an ergonomic study chair that saves your lumbar spine.");
-      whatYouSacrifice.push("15-minute scooter drive through rural roads to reach Ao Nang's seafood night markets and vibrant cafe strip.");
-      whatYouSacrifice.push("Dinner variety requires renting a scooter or waiting for Grab drivers on quiet Klong Muang lanes.");
-      bestSuitedFor = "Digital nomads and international executives whose client meetings and restorative deep sleep are non-negotiable.";
-      notIdealFor = "Solo backpackers seeking spontaneous beachfront bar crawls outside their front door.";
-      wifiRating = "⭐⭐⭐⭐⭐ 185 Mbps Fiber (Verified by Liam K. — zero packet drops)";
-      noiseVerdict = "🟢 Dead Quiet (Secluded cul-de-sac away from beach traffic)";
-      divingLogistics = "6 min scooter ride to Aqua Vision Dive Center";
-    } else if (prop.id === 'prop_krabi_02') {
-      vibeAtmosphere = "High-octane pierfront salt spray & late-night acoustic bass";
-      travelerFeeling = "Electrified by 3-minute boat departures and lively dive hub energy, but psychologically drained if you need quiet sleep before 1:00 AM.";
-      whatYouGain.push("Unbeatable doorstep logistics: 3 PADI 5-star dive shops are downstairs, with longtail boat pickups just 3 minutes away.");
-      whatYouGain.push("Exceptional budget efficiency at $72/night with a dedicated outdoor rinse tank for wetsuits and BCD gear.");
-      whatYouGain.push("Panoramic balcony vistas of longtail wooden bows bobbing against Ao Nang's limestone headlands.");
-      whatYouSacrifice.push("Punishing night noise: the live music bar across the alley blasts bass through single-pane glass until 1:00 AM.");
-      whatYouSacrifice.push("Vulnerable shared hotel Wi-Fi that dropped twice during team standups, making video calls high-risk.");
-      bestSuitedFor = "Passionate scuba divers on dawn boat itineraries who fall asleep easily and don't need to work on vacation.";
-      notIdealFor = "Remote engineers, light sleepers, or professionals managing international teams.";
-      wifiRating = "🔴 Vulnerable (Dropped twice during team standup — David S.)";
-      noiseVerdict = "🔴 Loud (Live music bar across alley blasts bass until 1:00 AM)";
-      divingLogistics = "Doorstep access (2 min walk to 3 PADI centers & longtails)";
-    } else if (prop.id === 'prop_krabi_03') {
-      vibeAtmosphere = "Dramatic prehistoric karst amphitheater & car-free tropical mist";
-      travelerFeeling = "Completely unhurried and grounded in raw natural wonder; deeply contemplative rather than corporate.";
-      whatYouGain.push("Total car-free tranquility: zero motorbikes or cars on Railay East, allowing emerald lagoon breezes and birdcalls.");
-      whatYouGain.push("Direct 8-minute boardwalk walk beneath towering karst cliffs to Railay Dive Center.");
-      whatYouGain.push("Eco-luxury aesthetic with teak woodwork, lush garden verandas, and postcard limestone views.");
-      whatYouSacrifice.push("Ergonomic limitation: only a low lounge coffee table with no proper desk or task chair for laptop work.");
-      whatYouSacrifice.push("Peninsula microwave internet link that throttles and lags during sudden tropical monsoon squalls.");
-      bestSuitedFor = "Writers, couples, and creative professionals seeking an unplugged nature escape with light email checking.";
-      notIdealFor = "Hardware or software engineers requiring multi-monitor setups or consistent upload bandwidth.";
-      wifiRating = "🟡 25 Mbps (Fine for Netflix/Slack, lags in heavy rainstorms — Chloe G.)";
-      noiseVerdict = "🟢 Dead Quiet (Zero cars or motorbikes on Railay peninsula)";
-      divingLogistics = "8 min boardwalk stroll to Railay Dive Center";
-    } else if (prop.id === 'prop_phuket_01') {
-      vibeAtmosphere = "Maritime efficiency & tech-forward focus at Chalong Marina";
-      travelerFeeling = "Accomplished, high-performing, and seamlessly balanced: dawn deep reef diving followed by evening sprint calls.";
-      whatYouGain.push("Instant 3-minute stroll to Chalong Pier where all day boats depart for Phi Phi and Racha islands at 7:30 AM.");
-      whatYouGain.push("Dedicated 24/7 second-floor co-working lounge equipped with external plug-in monitors and 200 Mbps fiber.");
-      whatYouGain.push("Double-glazed acoustic windows ensuring whisper-quiet sleep even during morning boat harbor prep.");
-      whatYouSacrifice.push("Industrial boat bay: Chalong is a working marina with moored yachts, not a soft white swimming beach.");
-      whatYouSacrifice.push("Reaching Kata or Nai Harn surf beaches requires a 12-minute taxi over the ridge ($10-15 each way).");
-      bestSuitedFor = "Working divers and product leads who demand uncompromising fiber speeds after a 3-dive day.";
-      notIdealFor = "Travelers whose primary fantasy is stepping straight out of bed onto powder-white sunbathing sands.";
-      wifiRating = "⭐⭐⭐⭐⭐ 200 Mbps Fiber + 24/7 Co-working monitors";
-      noiseVerdict = "🟢 Dead Quiet (Double-glazed acoustic glass in bedrooms)";
-      divingLogistics = "3 min walk to Chalong Pier departure docks";
-    } else if (prop.id === 'prop_phuket_02') {
-      vibeAtmosphere = "Panoramic Andaman Sea elevation & quiet tropical luxury";
-      travelerFeeling = "Elevated, private, and creatively inspired overlooking Rawai bay, with the serenity of a private hilltop villa.";
-      whatYouGain.push("Unrivaled 300 Mbps symmetric fiber bandwidth tested with zero packet loss across executive team reviews.");
-      whatYouGain.push("Private infinity pool overlooking the turquoise Andaman Sea with breathtaking golden-hour sunsets.");
-      whatYouGain.push("Total acoustic seclusion nestled amidst tropical rubber trees and coastal breeze.");
-      whatYouSacrifice.push("Steep 25-degree hillside access that demands a powerful 150cc scooter or rented SUV.");
-      whatYouSacrifice.push("11-minute drive down the winding ridge to reach Chalong dive boat departure docks.");
-      bestSuitedFor = "Tech leads, founders, and couples seeking high-end workcation luxury and total visual privacy.";
-      notIdealFor = "Nervous drivers or pedestrians who dislike steep hills.";
-      wifiRating = "⭐⭐⭐⭐⭐ 300 Mbps Symmetric (Tested by Karin M.)";
-      noiseVerdict = "🟢 Dead Quiet (Hillside jungle canopy)";
-      divingLogistics = "11 min drive down to Chalong Pier";
-    } else {
-      vibeAtmosphere = "Golden-hour surf breaks, iced espresso chatter & beachside ease";
-      travelerFeeling = "Carefree and sun-kissed with surfboards at the door, but slightly weary if commuting across the island daily.";
-      whatYouGain.push("Immediate barefoot access to Kata's golden sands and surfable waves.");
-      whatYouGain.push("Lively on-site cafe with artisanal coffee and relaxed social vibes.");
-      whatYouSacrifice.push("20-minute daily taxi crossing over the Kata hill to Chalong dive boats, adding $30-40 daily in Grab fares.");
-      whatYouSacrifice.push("Shared cafe Wi-Fi that fluctuates during lunch rush hours when guests crowd the router.");
-      bestSuitedFor = "Surfers, digital creatives, and social travelers who prioritize wave access over morning dive boat logistics.";
-      notIdealFor = "Serious divers on multi-day boat itineraries needing punctual dawn transfers.";
-      wifiRating = "🟡 45 Mbps (Adequate for Slack, fluctuates during cafe rush)";
-      noiseVerdict = "🟡 Moderate (Street and cafe chatter until 11:00 PM)";
-      divingLogistics = "20 min taxi across Kata hill to Chalong Pier";
-    }
-
+    const curated = CURATED_COPY[prop.id];
+    const derived = deriveDrawerCopy(prop);
     return {
       propertyId: prop.id,
       title: prop.title,
-      vibeAtmosphere,
-      travelerFeeling,
-      whatYouGain,
-      whatYouSacrifice,
-      bestSuitedFor,
-      notIdealFor,
-      wifiRating,
-      noiseVerdict,
-      divingLogistics
+      vibeAtmosphere: curated?.drawerVibe ?? derived.vibeAtmosphere,
+      travelerFeeling: curated?.drawerFeeling ?? derived.travelerFeeling,
+      whatYouGain: curated?.whatYouGain ?? derived.whatYouGain,
+      whatYouSacrifice: curated?.whatYouSacrifice ?? derived.whatYouSacrifice,
+      bestSuitedFor: curated?.bestSuitedFor ?? derived.bestSuitedFor,
+      notIdealFor: curated?.notIdealFor ?? derived.notIdealFor,
+      wifiRating: wifiLine(prop),
+      noiseVerdict: noiseLine(prop),
+      divingLogistics: diveLine(prop),
     };
   });
 
-  // Synthesize overarching verdict with travel expert persona
-  let overallVerdict = "";
-  let executiveRecommendation = "";
-
   if (pinnedProperties.length === 1) {
     const p = pinnedProperties[0];
-    overallVerdict = `Travel Editor's Assessment: ${p.title} presents an authentic profile rooted in ${p.reviewCount} verified guest experiences. The key here is acknowledging its intentional design—whether that leans toward deep digital productivity or doorstep island adventure.`;
-    executiveRecommendation = `Pin a 2nd or 3rd stay to contrast trade-offs side by side through our local editorial lens.`;
-  } else if (pinnedProperties.length === 2) {
-    const [a, b] = pinnedProperties;
-    overallVerdict = `Travel Editor's Nuanced Verdict: Contrasting ${a.title} ($${a.pricePerNightUsd}/nt) against ${b.title} ($${b.pricePerNightUsd}/nt) lays bare the classic Andaman conundrum: guaranteed acoustic serenity and unflinching fiber bandwidth versus raw, doorstep pier accessibility and beachfront nightlife. One is built for deep cognitive focus and restorative rest; the other is designed for dawn boat departures and high-energy social exploration.`;
-    executiveRecommendation = `Our Editorial Recommendation: If your trip depends on high-stakes video calls or restorative sleep, choose ${a.title}—the 15-minute Grab commute for dinner is a small price to pay for unbroken peace of mind. Conversely, if you are in Thailand primarily for dawn scuba boats and prioritize saving commute minutes over quiet sleep, ${b.title} delivers unbeatable logistics at an accessible rate.`;
-  } else {
-    const [a, b, c] = pinnedProperties;
-    overallVerdict = `Travel Editor's Triangulation: Comparing ${a.title}, ${b.title}, and ${c.title} illustrates three distinct Andaman lifestyles. We have the executive workcation haven (teak seclusion and enterprise-grade fiber for deep focus), the high-velocity pierfront basecamp (immediate longtail access at the expense of nightlife noise), and the bohemian retreat (postcard natural wonder with casual island ergonomics).`;
-    executiveRecommendation = `Our Editorial Recommendation: For travelers with mandatory daily Zoom meetings, ${pinnedProperties.find(p => p.verifiedHighlights.wifiSpeedMbps && p.verifiedHighlights.wifiSpeedMbps > 100)?.title || a.title} is the only property with verified high-bitrate video stability. If your itinerary is 80% scuba and you wake up at dawn, book the pierfront option; for romantic, slow-paced rejuvenation, choose the car-free cliff sanctuary.`;
+    return {
+      pinnedProperties,
+      overallVerdict: `${p.title} ($${p.pricePerNightUsd}/night, rated ${p.rating} across ${p.reviewCount} reviews). Its strengths and compromises are listed below, each tied to a guest review.`,
+      comparisonMatrix,
+      executiveRecommendation: "Pin a second or third stay to see the trade-offs side by side."
+    };
   }
 
-  return {
-    pinnedProperties,
-    overallVerdict,
-    comparisonMatrix,
-    executiveRecommendation
-  };
+  // Data-driven verdict: find who wins each dimension, led by what the traveler asked for.
+  const priorities = prioritiesFromQuery(userQuery);
+  const winners = priorities.map(pr => ({ priority: pr, property: bestFor(pinnedProperties, pr) }));
+
+  // Group dimensions by the property that wins them.
+  const byProperty = new Map<string, Priority[]>();
+  for (const w of winners) byProperty.set(w.property.id, [...(byProperty.get(w.property.id) ?? []), w.priority]);
+
+  const LABEL: Record<Priority, string> = { wifi: 'Wi-Fi', noise: 'quiet nights', diving: 'dive access', price: 'price' };
+  const titleOf = (id: string) => pinnedProperties.find(p => p.id === id)!.title;
+  const join = (xs: string[]) => xs.length <= 1 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`;
+
+  const tensions = [...byProperty.entries()].map(([id, prs]) => `${titleOf(id)} leads on ${join(prs.map(p => LABEL[p]))}`);
+  const overallVerdict = byProperty.size === 1
+    ? `${titleOf([...byProperty.keys()][0])} wins on every dimension we compare (Wi-Fi, quiet, dive access and price), so the others only make sense for reasons outside these criteria.`
+    : `No single stay wins everything: ${join(tensions)}. Which one is right depends on what you're least willing to give up.`;
+
+  // Recommendation: one clause per distinct winner, in priority order.
+  const seen = new Set<string>();
+  const clauses: string[] = [];
+  for (const w of winners) {
+    if (seen.has(w.property.id)) continue;
+    seen.add(w.property.id);
+    clauses.push(`If ${PRIORITY_PHRASE[w.priority](w.property)}`);
+  }
+  const executiveRecommendation = clauses.length === 1
+    ? `${clauses[0]}. It covers all of your stated priorities.`
+    : `${clauses.join('. ')}.`;
+
+  return { pinnedProperties, overallVerdict, comparisonMatrix, executiveRecommendation };
+}
+
+/** Kept for backwards compatibility; the sync synthesizer is the fallback everywhere now. */
+export async function synthesizeTradeOffVerdict(pinnedProperties: Property[], userQuery: string): Promise<TradeOffVerdict> {
+  return synthesizeEditorialVerdictSync(pinnedProperties, userQuery);
 }

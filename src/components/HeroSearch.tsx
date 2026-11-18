@@ -128,7 +128,7 @@ export const HeroSearch: React.FC<HeroSearchProps> = ({
                 </h3>
               </div>
               <div className="flex items-center gap-3 text-xs text-slate-500">
-                <span>Engine: <strong className="text-slate-800">{engineSource || 'Gemini 3.8 Flash'}</strong></span>
+                <span>Engine: <strong className="text-slate-800">{engineSource || 'Analyzing…'}</strong></span>
                 <span aria-hidden="true">·</span>
                 <span>Split Latency: <strong className="text-slate-800 font-mono">140ms</strong></span>
               </div>

@@ -19,8 +19,9 @@ React and Vite front end, Express server (`server.ts`) calling the Gemini API th
 |---|---|
 | `POST /api/decompose` | Turns the natural-language query into structured filters and review signals |
 | `POST /api/tradeoff` | Writes the three-way comparison verdict |
+| `GET /api/health` | Reports whether Gemini is configured or backing off after a quota error |
 
-The evidence matching runs in `src/lib/evidenceEngine.ts`.
+The evidence matching runs in `src/lib/evidenceEngine.ts`. It matches whole words and skips negated phrases ("never cut out", "zero packet loss"), reads Mbps figures out of reviews, and builds the fallback trade-off verdict from the listing data, led by the priorities in the traveler's query. Hand-written editorial copy for the six sample stays lives in `src/lib/editorialCopy.ts`; stays added in the sandbox get copy derived from their own data.
 
 ## What's real and what's simulated
 
@@ -45,12 +46,18 @@ The evidence matching runs in `src/lib/evidenceEngine.ts`.
 
 ## Run it locally
 
-Requires Node.js.
+Requires Node.js 20+.
 
 ```bash
 npm install
 cp .env.example .env    # add your own GEMINI_API_KEY; never commit .env
-npm run dev
+npm run dev             # http://localhost:3000
 ```
 
-Without a key, the app uses its rule-based fallback.
+Without a key, the app uses its rule-based fallback. Optional settings in `.env`: `GEMINI_MODEL` (defaults to `gemini-3.8-flash`) and `PORT`.
+
+```bash
+npm test                # unit tests for the evidence engine
+npm run lint            # type-check
+npm run build && npm start   # production build served by Express
+```

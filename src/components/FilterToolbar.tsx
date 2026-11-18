@@ -7,6 +7,8 @@ interface FilterToolbarProps {
   onSelectRegion: (region: string) => void;
   maxPrice: number;
   onChangeMaxPrice: (price: number) => void;
+  /** Slider value at which no price limit is applied. */
+  priceSliderMax: number;
   selectedAmenity: string;
   onSelectAmenity: (amenity: string) => void;
   sortBy: 'score' | 'price-asc' | 'price-desc' | 'rating' | 'dive-proximity';
@@ -20,6 +22,7 @@ export const FilterToolbar: React.FC<FilterToolbarProps> = ({
   onSelectRegion,
   maxPrice,
   onChangeMaxPrice,
+  priceSliderMax,
   selectedAmenity,
   onSelectAmenity,
   sortBy,
@@ -50,6 +53,27 @@ export const FilterToolbar: React.FC<FilterToolbarProps> = ({
               </button>
             ))}
           </div>
+
+          <div className="h-4 w-px bg-slate-200 hidden sm:block" />
+
+          {/* Nightly price limit */}
+          <label className="flex items-center gap-2 text-slate-600">
+            <DollarSign className="w-3.5 h-3.5 text-slate-400" aria-hidden="true" />
+            <span className="sr-only">Maximum price per night</span>
+            <input
+              type="range"
+              min={50}
+              max={priceSliderMax}
+              step={10}
+              value={maxPrice}
+              onChange={(e) => onChangeMaxPrice(Number(e.target.value))}
+              className="w-24 accent-[#0E4D54] cursor-pointer"
+              aria-valuetext={maxPrice >= priceSliderMax ? 'Any price' : `Up to $${maxPrice} per night`}
+            />
+            <span className="font-mono font-semibold text-slate-800 w-14">
+              {maxPrice >= priceSliderMax ? 'Any $' : `≤ $${maxPrice}`}
+            </span>
+          </label>
 
           <div className="h-4 w-px bg-slate-200 hidden sm:block" />
 

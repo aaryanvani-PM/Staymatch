@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import initialPropertiesData from './data/properties.json';
 import { Property, PropertyEvidenceResult, DecomposedQuery, EvidenceCitation, Review, TradeOffVerdict } from './types';
-import { decomposeQuery, filterAndScoreProperties, synthesizeTradeOffVerdict, PRESET_QUERIES } from './lib/evidenceEngine';
+import { decomposeQuery, filterAndScoreProperties, synthesizeEditorialVerdictSync, compareByMatchThenScore, DEFAULT_QUERY } from './lib/evidenceEngine';
 import { Header } from './components/Header';
 import { HeroSearch } from './components/HeroSearch';
 import { FilterToolbar } from './components/FilterToolbar';
@@ -14,21 +14,21 @@ import { CustomPropertyModal } from './components/CustomPropertyModal';
 import { PairExplainer } from './components/PairExplainer';
 import { Footer } from './components/Footer';
 
+const PRICE_SLIDER_MAX = 300;
+
 export default function App() {
   // Dataset state (seed properties + any user custom properties)
   const [properties, setProperties] = useState<Property[]>(initialPropertiesData as Property[]);
 
   // Search & Query Decomposition state
-  const [currentQuery, setCurrentQuery] = useState<string>(
-    "Quiet place in Krabi under $130 with fast Wi-Fi for Zoom & near dive shops"
-  );
+  const [currentQuery, setCurrentQuery] = useState<string>(DEFAULT_QUERY);
   const [decomposed, setDecomposed] = useState<DecomposedQuery | null>(null);
   const [isDecomposing, setIsDecomposing] = useState<boolean>(false);
-  const [engineSource, setEngineSource] = useState<string>('Gemini 3.8 Flash');
+  const [engineSource, setEngineSource] = useState<string>('');
 
   // UI Filter Toolbar state
   const [selectedRegion, setSelectedRegion] = useState<string>('All');
-  const [maxPriceFilter, setMaxPriceFilter] = useState<number>(200);
+  const [maxPriceFilter, setMaxPriceFilter] = useState<number>(PRICE_SLIDER_MAX);
   const [selectedAmenity, setSelectedAmenity] = useState<string>('all');
   const [sortBy, setSortBy] = useState<'score' | 'price-asc' | 'price-desc' | 'rating' | 'dive-proximity'>('score');
 
@@ -52,38 +52,41 @@ export default function App() {
   // Custom Sandbox Property Modal
   const [isSandboxOpen, setIsSandboxOpen] = useState<boolean>(false);
 
+  // Ignore responses from searches that have since been superseded.
+  const searchSeq = useRef(0);
+  const verdictSeq = useRef(0);
+
+  const applyDecomposition = (result: DecomposedQuery, source: string) => {
+    setDecomposed(result);
+    setEngineSource(source);
+    // Follow the query's region; a query without one clears a region left over from a previous search.
+    setSelectedRegion(result.hardFilters.region || 'All');
+  };
+
   // Decompose query via server API with resilient heuristic fallback
   const handleExecuteSearch = useCallback(async (queryToRun: string) => {
-    setCurrentQuery(queryToRun);
+    const trimmed = queryToRun.trim();
+    if (!trimmed) return;
+    const seq = ++searchSeq.current;
+    setCurrentQuery(trimmed);
     setIsDecomposing(true);
 
     try {
       const response = await fetch('/api/decompose', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: queryToRun }),
+        body: JSON.stringify({ query: trimmed }),
       });
-
-      if (response.ok) {
-        const data = await response.json();
-        setDecomposed(data);
-        setEngineSource(data.source || 'Gemini 3.8 Flash');
-        if (data.hardFilters?.region) {
-          setSelectedRegion(data.hardFilters.region);
-        }
-      } else {
-        throw new Error('API request failed');
-      }
-    } catch (err) {
-      // Resilient local fallback
-      const localResult = decomposeQuery(queryToRun);
-      setDecomposed(localResult);
-      setEngineSource('Heuristic Semantic Engine');
-      if (localResult.hardFilters.region) {
-        setSelectedRegion(localResult.hardFilters.region);
-      }
+      if (!response.ok) throw new Error(`Decompose API returned ${response.status}`);
+      const data = await response.json();
+      if (seq !== searchSeq.current) return;
+      applyDecomposition(data, data.source || 'Server');
+    } catch {
+      if (seq !== searchSeq.current) return;
+      // Server unreachable: run the same rule-based engine in the browser.
+      applyDecomposition(decomposeQuery(trimmed), 'Rule-Based Engine (offline)');
     } finally {
-      setIsDecomposing(false);
+      if (seq === searchSeq.current) setIsDecomposing(false);
     }
   }, []);
 
@@ -92,11 +95,15 @@ export default function App() {
     handleExecuteSearch(currentQuery);
   }, []);
 
-  // Synthesize Trade-off verdict when pinned stays change or user opens drawer
+  // Synthesize the trade-off verdict for the pinned stays (in pin order).
   const fetchTradeOffVerdict = useCallback(async () => {
-    const pinnedProps = properties.filter((p) => pinnedIds.includes(p.id));
+    const pinnedProps = pinnedIds
+      .map((id) => properties.find((p) => p.id === id))
+      .filter((p): p is Property => Boolean(p));
+    const seq = ++verdictSeq.current;
     if (pinnedProps.length === 0) {
       setTradeOffVerdict(null);
+      setIsLoadingVerdict(false);
       return;
     }
 
@@ -111,26 +118,21 @@ export default function App() {
         }),
       });
 
-      if (response.ok) {
-        const data = await response.json();
-        setTradeOffVerdict(data);
-      } else {
-        throw new Error('Tradeoff API failed');
-      }
-    } catch (err) {
-      // Resilient local fallback
-      const localVerdict = await synthesizeTradeOffVerdict(pinnedProps, currentQuery);
-      setTradeOffVerdict(localVerdict);
+      if (!response.ok) throw new Error(`Trade-off API returned ${response.status}`);
+      const data = await response.json();
+      if (seq === verdictSeq.current) setTradeOffVerdict(data);
+    } catch {
+      // Server unreachable: synthesize locally instead of retrying the same endpoint.
+      if (seq === verdictSeq.current) setTradeOffVerdict(synthesizeEditorialVerdictSync(pinnedProps, currentQuery));
     } finally {
-      setIsLoadingVerdict(false);
+      if (seq === verdictSeq.current) setIsLoadingVerdict(false);
     }
   }, [pinnedIds, properties, currentQuery]);
 
+  // Only spend a model call when the drawer is actually open; refresh if pins or the query change while it is.
   useEffect(() => {
-    if (pinnedIds.length > 0) {
-      fetchTradeOffVerdict();
-    }
-  }, [pinnedIds, properties]);
+    if (isTradeOffOpen) fetchTradeOffVerdict();
+  }, [isTradeOffOpen, fetchTradeOffVerdict]);
 
   // Handle Pin toggling
   const handleTogglePin = (propertyId: string) => {
@@ -145,14 +147,16 @@ export default function App() {
   };
 
   const handleClearAllPins = () => {
+    verdictSeq.current++;
     setPinnedIds([]);
     setTradeOffVerdict(null);
+    setIsLoadingVerdict(false);
   };
 
   // Add custom property to sandbox
   const handleAddCustomProperty = (newProp: Property) => {
-    setProperties([newProp, ...properties]);
-    setPinnedIds([newProp.id, ...pinnedIds.slice(0, 2)]);
+    setProperties((prev) => [newProp, ...prev]);
+    setPinnedIds((prev) => [newProp.id, ...prev.slice(0, 2)]);
   };
 
   // Compute evaluated results
@@ -169,6 +173,11 @@ export default function App() {
           r.property.region.toLowerCase() === selectedRegion.toLowerCase() ||
           r.property.location.toLowerCase().includes(selectedRegion.toLowerCase())
       );
+    }
+
+    // Apply price slider (the top of the range means "any price")
+    if (maxPriceFilter < PRICE_SLIDER_MAX) {
+      results = results.filter((r) => r.property.pricePerNightUsd <= maxPriceFilter);
     }
 
     // Apply Amenity filter
@@ -193,13 +202,15 @@ export default function App() {
           return a.property.distanceToDiveCenterMins - b.property.distanceToDiveCenterMins;
         case 'score':
         default:
-          return b.score - a.score;
+          return compareByMatchThenScore(a, b);
       }
     });
-  }, [properties, decomposed, selectedRegion, selectedAmenity, sortBy]);
+  }, [properties, decomposed, selectedRegion, maxPriceFilter, selectedAmenity, sortBy]);
 
   const pinnedPropertiesList = useMemo(() => {
-    return properties.filter((p) => pinnedIds.includes(p.id));
+    return pinnedIds
+      .map((id) => properties.find((p) => p.id === id))
+      .filter((p): p is Property => Boolean(p));
   }, [properties, pinnedIds]);
 
   return (
@@ -210,7 +221,7 @@ export default function App() {
         onOpenTradeOff={() => setIsTradeOffOpen(true)}
         onOpenMetrics={() => setIsMetricsOpen(true)}
         onOpenSandbox={() => setIsSandboxOpen(true)}
-        onResetSearch={() => handleExecuteSearch("Quiet place in Krabi under $130 with fast Wi-Fi for Zoom & near dive shops")}
+        onResetSearch={() => handleExecuteSearch(DEFAULT_QUERY)}
       />
 
       {/* A/B Control Mode Notice Banner */}
@@ -234,7 +245,7 @@ export default function App() {
         decomposed={decomposed}
         isLoading={isDecomposing}
         onSearch={handleExecuteSearch}
-        onReset={() => handleExecuteSearch("Quiet place in Krabi under $130 with fast Wi-Fi for Zoom & near dive shops")}
+        onReset={() => handleExecuteSearch(DEFAULT_QUERY)}
         engineSource={engineSource}
       />
 
@@ -245,12 +256,14 @@ export default function App() {
         onSelectRegion={setSelectedRegion}
         maxPrice={maxPriceFilter}
         onChangeMaxPrice={setMaxPriceFilter}
+        priceSliderMax={PRICE_SLIDER_MAX}
         selectedAmenity={selectedAmenity}
         onSelectAmenity={setSelectedAmenity}
         sortBy={sortBy}
         onChangeSortBy={setSortBy}
         onResetFilters={() => {
           setSelectedRegion('All');
+          setMaxPriceFilter(PRICE_SLIDER_MAX);
           setSelectedAmenity('all');
           setSortBy('score');
         }}
@@ -258,7 +271,25 @@ export default function App() {
 
       {/* Main Results Grid */}
       <main className="flex-1 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-24 w-full">
-        {abMode === 'control' ? (
+        {decomposed && evaluatedResults.length === 0 ? (
+          <div className="text-center py-16 bg-white border border-dashed border-[#D8C3AE] rounded-2xl">
+            <h3 className="font-serif text-lg font-semibold text-slate-800">No stays match these filters</h3>
+            <p className="text-xs text-slate-500 mt-1 mb-4">
+              Try widening the price limit, switching region, or clearing the amenity filter.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedRegion('All');
+                setMaxPriceFilter(PRICE_SLIDER_MAX);
+                setSelectedAmenity('all');
+              }}
+              className="text-xs font-semibold px-4 py-2 rounded-lg bg-[#0E4D54] text-white hover:bg-[#0B3D43] cursor-pointer"
+            >
+              Clear filters
+            </button>
+          </div>
+        ) : abMode === 'control' ? (
           /* Control Legacy View: Uninformative binary checkboxes */
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {evaluatedResults.map((result) => (
